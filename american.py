@@ -1,3 +1,9 @@
+# Switch to 'european' to match Black–Scholes when div_yield=0.
+# Greeks here are computed with finite differences (bump-and-revalue) so they’re stable and work for both American and European cases.
+# vega() returns sensitivity per 1.00 change in vol; I divide by 100 in the print so you get per 1% vol.
+# theta() is per year (default bump is 1 day). Adjust abs_bump if you want a different step.
+
+
 import math
 from dataclasses import dataclass
 
@@ -96,13 +102,20 @@ class BinomialOption:
         return (r_up - r_dn) / (2.0 * abs_bump)
 
 
-# ---- testing (similar to your style) ----
-if __name__ == "__main__":
-    S, K, T, r, sig = 100, 100, 1.0, 0.05, 0.20
 
-    call_am = BinomialOption(S, K, T, r, sig, 'call', 'american', steps=1000, div_yield=0.0)
-    put_am  = BinomialOption(S, K, T, r, sig, 'put',  'american', steps=1000, div_yield=0.0)
-    call_eu = BinomialOption(S, K, T, r, sig, 'call', 'european', steps=1000, div_yield=0.0)
+if __name__ == "__main__":
+    stock_price = 100.0
+    strike      = 100.0
+    ttm         = 1.0      # years
+    rfr         = 0.05     # risk-free rate
+    sigma       = 0.20     # volatility
+
+    call_am = BinomialOption(stock_price, strike, ttm, rfr, sigma,
+                             option_type='call', exercise='american', steps=1000, div_yield=0.0)
+    put_am  = BinomialOption(stock_price, strike, ttm, rfr, sigma,
+                             option_type='put',  exercise='american', steps=1000, div_yield=0.0)
+    call_eu = BinomialOption(stock_price, strike, ttm, rfr, sigma,
+                             option_type='call', exercise='european', steps=1000, div_yield=0.0)
 
     print("American Call:")
     print(f"  Price : {call_am.price():.6f}")
