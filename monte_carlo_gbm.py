@@ -1,41 +1,110 @@
 
+#!/usr/bin/env python3
+"""
+mc_gbm_minimal.py
+
+A single, minimal script that:
+  1) Performs Monte Carlo option pricing under GBM
+  2) Compares to baselines (Black–Scholes; optionally actual market CSV)
+  3) Executes and prints results for your paper
+
+Usage:
+  python mc_gbm_minimal.py
+  python mc_gbm_minimal.py --market_csv market_data.csv
+  python mc_gbm_minimal.py --seed 7
+
+CSV format for --market_csv (header required):
+  S0,K,r,q,T,option_type,market_mid,market_bid,market_ask,sigma,n_paths
+Notes:
+  - If 'sigma' is blank, implied volatility is backed out via bisection.
+  - 'market_bid' and 'market_ask' are optional; if both present, bid-ask coverage is reported.
+"""
+
 import argparse
-import os
+import csv
+import sys
 from math import exp, log, sqrt, erf, ceil
+from typing import List, Dict, Optional
+
 import numpy as np
-import pandas as pd
 
-# ---- Matplotlib backend: force a headless-safe backend before importing pyplot ----
-# Prefer Agg (file-only). If a display is available, you can remove these lines.
-os.environ.setdefault("MPLBACKEND", "Agg")
-import matplotlib
-try:
-    matplotlib.use(os.environ["MPLBACKEND"])
-except Exception:
-    matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 
-# ------------------------------ Normal CDF & Black–Scholes ------------------------------
+# ------------------------------
+# Utilities: printing tables
+# ------------------------------
+def format_number(x, digits=6):
+    """Consistent numeric formatting."""
+    try:
+        return f"{x:.{digits}f}"
+    except Exception:
+        return str(x)
+
+
+def print_table(headers: List[str], rows: List[List], digits=6):
+    """Print a simple aligned ASCII table without external libraries."""
+    cols = len(headers)
+    # Prepare string rows
+    str_rows = []
+    for row in rows:
+        str_row = []
+        for v in row:
+            if isinstance(v, float):
+                str_row.append(format_number(v, digits))
+            else:
+                str_row.append(str(v))
+        str_rows.append(str_row)
+    # Column widths
+    widths = [len(h) for h in headers]
+    for r in str_rows:
+        for j in range(cols):
+            widths[j] = max(widths[j], len(r[j]))
+    # Print header
+    header_line = " | ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
+    sep_line = "-+-".join("-" * widths[i] for i in range(cols))
+    print(header_line)
+    print(sep_line)
+    # Print rows
+    for r in str_rows:
+        print(" | ".join(r[i].ljust(widths[i]) for i in range(cols)))
+    print()
+
+
+# ------------------------------
+# Model: Normal CDF & Black–Scholes
+# ------------------------------
 def std_norm_cdf(x: float) -> float:
+    """Standard normal CDF via error function (no SciPy needed)."""
     return 0.5 * (1.0 + erf(x / sqrt(2.0)))
 
+
 def black_scholes_price(S0, K, r, q, sigma, T, option_type='call'):
+    """
+    Black-Scholes/Merton price for European call/put with continuous dividend yield q.
+    """
+    # Edge handling: T ~ 0 or sigma ~ 0 → discounted forward intrinsic
     if T <= 0 or sigma <= 0:
         forward = S0 * exp((r - q) * T)
         df = exp(-r * T)
         return df * (max(forward - K, 0) if option_type == 'call' else max(K - forward, 0))
+
     d1 = (log(S0 / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * sqrt(T))
     d2 = d1 - sigma * sqrt(T)
     df = exp(-r * T)
     dq = exp(-q * T)
+
     if option_type.lower() == 'call':
         return dq * S0 * std_norm_cdf(d1) - df * K * std_norm_cdf(d2)
     else:
         return df * K * std_norm_cdf(-d2) - dq * S0 * std_norm_cdf(-d1)
 
-# ------------------------------ Implied volatility via bisection ------------------------------
-def implied_vol_bisection(S0, K, r, q, T, market_price, option_type='call', tol=1e-6, max_iter=200):
-    low, high = 1e-6, 5.0
+
+# ------------------------------
+# Implied volatility via bisection
+# ------------------------------
+def implied_vol_bisection(S0, K, r, q, T, market_price, option_type='call',
+                          tol=1e-6, max_iter=200, vol_low=1e-6, vol_high=5.0):
+    """Back out implied vol so Black–Scholes price equals market price."""
+    low, high = vol_low, vol_high
     for _ in range(max_iter):
         mid = 0.5 * (low + high)
         price = black_scholes_price(S0, K, r, q, mid, T, option_type)
@@ -47,10 +116,25 @@ def implied_vol_bisection(S0, K, r, q, T, market_price, option_type='call', tol=
             high = mid
     return 0.5 * (low + high)
 
-# ------------------------------ Monte Carlo: exact GBM to S_T ------------------------------
-def mc_european_option_gbm(S0, K, r, q, sigma, T, n_paths=200_000, option_type='call',
-                           antithetic=True, control_variate=True, seed=42):
+
+# ------------------------------
+# Monte Carlo: exact GBM to S_T
+# ------------------------------
+def mc_european_option_gbm(
+    S0, K, r, q, sigma, T,
+    n_paths=200_000,
+    option_type='call',
+    antithetic=True,
+    control_variate=True,
+    seed=7
+):
+    """
+    Monte Carlo price for European call/put under risk-neutral GBM.
+    Uses exact one-step to S_T (no time discretization bias for Europeans).
+    """
     rng = np.random.default_rng(seed)
+
+    # Antithetic sampling: use m normals, then +-Z to nearly double samples
     m = n_paths // 2 if antithetic else n_paths
     Z = rng.standard_normal(m)
 
@@ -66,6 +150,7 @@ def mc_european_option_gbm(S0, K, r, q, sigma, T, n_paths=200_000, option_type='
 
     df = exp(-r * T)
 
+    # Payoffs
     if option_type.lower() == 'call':
         payoffs = np.maximum(ST_all - K, 0.0)
     else:
@@ -73,6 +158,7 @@ def mc_european_option_gbm(S0, K, r, q, sigma, T, n_paths=200_000, option_type='
 
     disc_payoffs = df * payoffs
 
+    # Control variate: discounted S_T has known expectation S0 * e^{-qT}
     if control_variate:
         X = df * ST_all
         EX = S0 * exp(-q * T)
@@ -80,21 +166,33 @@ def mc_european_option_gbm(S0, K, r, q, sigma, T, n_paths=200_000, option_type='
         var_X  = np.var(X, ddof=1)
         c_opt  = cov_YX / var_X if var_X > 0 else 0.0
         adj = disc_payoffs - c_opt * (X - EX)
-        est = np.mean(adj)
-        sample_std = np.std(adj, ddof=1)
+        est = float(np.mean(adj))
+        sample_std = float(np.std(adj, ddof=1))
     else:
-        est = np.mean(disc_payoffs)
-        sample_std = np.std(disc_payoffs, ddof=1)
+        est = float(np.mean(disc_payoffs))
+        sample_std = float(np.std(disc_payoffs, ddof=1))
 
     n = len(ST_all)
     stderr = sample_std / sqrt(n)
     ci95 = (est - 1.96 * stderr, est + 1.96 * stderr)
     bs_price = black_scholes_price(S0, K, r, q, sigma, T, option_type)
-    return {"price": est, "stderr": stderr, "ci95": ci95, "bs_price": bs_price,
-            "n_paths": n, "used_antithetic": antithetic, "used_control_variate": control_variate}
 
-# ------------------------------ Evaluation helpers ------------------------------
-def evaluate_single_run(result):
+    return {
+        "price": est,
+        "stderr": stderr,
+        "ci95": ci95,
+        "bs_price": bs_price,
+        "n_paths": n,
+        "used_antithetic": antithetic,
+        "used_control_variate": control_variate
+    }
+
+
+# ------------------------------
+# Evaluation helpers
+# ------------------------------
+def evaluate_single_run(result: Dict[str, float]) -> Dict[str, float]:
+    """Diagnostics vs Black–Scholes for one MC run."""
     price = result['price']
     bs = result['bs_price']
     stderr = result['stderr']
@@ -103,140 +201,205 @@ def evaluate_single_run(result):
     rel_err = abs_err / max(bs, 1e-12)
     bs_in_ci = (ci_low <= bs <= ci_high)
     z = (price - bs) / max(stderr, 1e-12)
-    return {"abs_error": abs_err, "rel_error": rel_err, "bs_in_ci": bs_in_ci,
-            "z_score": z, "ci_low": ci_low, "ci_high": ci_high}
+    return {
+        "abs_error": abs_err,
+        "rel_error": rel_err,
+        "bs_in_ci": bs_in_ci,
+        "z_score": z,
+        "ci_low": ci_low,
+        "ci_high": ci_high
+    }
 
-def compare_to_market(market_df: pd.DataFrame, default_n_paths=150_000, seed_base=500):
-    rows = []
-    for i, row in market_df.iterrows():
-        S0 = float(row['S0']); K = float(row['K']); r = float(row['r']); q = float(row['q']); T = float(row['T'])
+
+def compare_to_market_rows(rows: List[Dict[str, str]], default_n_paths=150_000, seed_base=500):
+    """
+    Compare MC prices to market mids across a provided list of dict rows.
+    Returns (out_rows, rmse, coverage_ci, coverage_ba).
+    """
+    out_rows = []
+    abs_errors_sq = []
+    ci_hits = []
+    bidask_hits = []
+
+    for i, row in enumerate(rows):
+        # Parse inputs safely
+        S0 = float(row['S0']); K = float(row['K']); r_ = float(row['r']); q_ = float(row['q']); T_ = float(row['T'])
         typ = str(row['option_type']).lower()
         market_mid = float(row['market_mid'])
-        bid = float(row['market_bid']) if 'market_bid' in row and pd.notna(row['market_bid']) else None
-        ask = float(row['market_ask']) if 'market_ask' in row and pd.notna(row['market_ask']) else None
-        n_paths = int(row['n_paths']) if 'n_paths' in row and pd.notna(row['n_paths']) else default_n_paths
-        sigma = float(row['sigma']) if 'sigma' in row and pd.notna(row['sigma']) else implied_vol_bisection(S0, K, r, q, T, market_mid, option_type=typ)
+        bid = float(row['market_bid']) if (row.get('market_bid') not in (None, "")) else None
+        ask = float(row['market_ask']) if (row.get('market_ask') not in (None, "")) else None
+        n_paths = int(row['n_paths']) if (row.get('n_paths') not in (None, "")) else default_n_paths
 
-        res = mc_european_option_gbm(S0=S0, K=K, r=r, q=q, sigma=sigma, T=T,
-                                     n_paths=n_paths, option_type=typ,
-                                     antithetic=True, control_variate=True, seed=seed_base + i)
+        # Use provided sigma or back out implied vol from market mid
+        if row.get('sigma') not in (None, ""):
+            sigma_ = float(row['sigma'])
+        else:
+            sigma_ = implied_vol_bisection(S0, K, r_, q_, T_, market_mid, option_type=typ)
+
+        res = mc_european_option_gbm(
+            S0=S0, K=K, r=r_, q=q_, sigma=sigma_, T=T_,
+            n_paths=n_paths, option_type=typ,
+            antithetic=True, control_variate=True, seed=seed_base + i
+        )
         price = res['price']; stderr = res['stderr']; ci_low, ci_high = res['ci95']; bs = res['bs_price']
-        abs_err = abs(price - market_mid); rel_err = abs_err / max(market_mid, 1e-12)
+
+        abs_err = abs(price - market_mid)
+        rel_err = abs_err / max(market_mid, 1e-12)
         in_ci = (ci_low <= market_mid <= ci_high)
         in_ba = None
         if bid is not None and ask is not None and bid <= ask:
             in_ba = (bid <= price <= ask)
 
-        rows.append({"S0": S0, "K": K, "r": r, "q": q, "T": T, "type": typ,
-                    "market_mid": market_mid, "market_bid": bid, "market_ask": ask,
-                    "sigma": sigma, "n_paths": n_paths, "mc_price": price, "stderr": stderr,
-                    "ci_low": ci_low, "ci_high": ci_high, "bs_price": bs,
-                    "abs_error": abs_err, "rel_error": rel_err,
-                    "market_in_mc_ci": in_ci, "price_in_bid_ask": in_ba})
+        # Aggregate metrics
+        abs_errors_sq.append(abs_err**2)
+        ci_hits.append(1 if in_ci else 0)
+        if in_ba is not None:
+            bidask_hits.append(1 if in_ba else 0)
 
-    out_df = pd.DataFrame(rows)
-    rmse = float(np.sqrt(np.mean(out_df['abs_error'] ** 2))) if len(out_df) else float('nan')
-    coverage_ci = float(np.mean(out_df['market_in_mc_ci'])) if len(out_df) else float('nan')
-    coverage_ba = None
-    if 'price_in_bid_ask' in out_df.columns and out_df['price_in_bid_ask'].notna().any():
-        coverage_ba = float(np.mean(out_df['price_in_bid_ask'].dropna()))
-    return out_df, rmse, coverage_ci, coverage_ba
+        out_rows.append({
+            "S0": S0, "K": K, "r": r_, "q": q_, "T": T_, "type": typ,
+            "market_mid": market_mid, "market_bid": bid, "market_ask": ask,
+            "sigma": sigma_, "n_paths": n_paths,
+            "mc_price": price, "stderr": stderr, "ci_low": ci_low, "ci_high": ci_high,
+            "bs_price": bs, "abs_error": abs_err, "rel_error": rel_err,
+            "market_in_mc_ci": in_ci, "price_in_bid_ask": in_ba
+        })
 
-# ------------------------------ Main execution ------------------------------
+    rmse = sqrt(sum(abs_errors_sq) / max(len(abs_errors_sq), 1)) if abs_errors_sq else float("nan")
+    coverage_ci = (sum(ci_hits) / len(ci_hits)) if ci_hits else float("nan")
+    coverage_ba = (sum(bidask_hits) / len(bidask_hits)) if bidask_hits else None
+
+    return out_rows, rmse, coverage_ci, coverage_ba
+
+
+# ------------------------------
+# CSV helpers (standard library only)
+# ------------------------------
+def save_csv(path: str, headers: List[str], rows: List[List]):
+    """Write a CSV file using only the standard library."""
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+        writer.writerows(rows)
+
+
+def read_market_csv(path: str) -> List[Dict[str, str]]:
+    """Read market CSV into list-of-dicts using only the standard library."""
+    out = []
+    with open(path, "r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            out.append(row)
+    return out
+
+
+# ------------------------------
+# Main execution
+# ------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Monte Carlo GBM pricing + baseline comparison")
-    parser.add_argument('--market_csv', type=str, default=None,
-                        help='Optional CSV with columns: S0,K,r,q,T,option_type,market_mid,[market_bid],[market_ask],[sigma],[n_paths]')
-    parser.add_argument('--seed', type=int, default=7, help='Base RNG seed')
-    parser.add_argument('--no_plot', action='store_true', help='Skip generating the convergence plot')
+    parser = argparse.ArgumentParser(description="Minimal Monte Carlo GBM pricing + baseline comparison")
+    parser.add_argument("--market_csv", type=str, default=None,
+                        help="Optional CSV: S0,K,r,q,T,option_type,market_mid,[market_bid],[market_ask],[sigma],[n_paths]")
+    parser.add_argument("--seed", type=int, default=7, help="Base RNG seed")
     args = parser.parse_args()
 
-    # 1) Single-run baseline (European call)
-    S0, K, r, q, sigma, T = 100, 100, 0.03, 0.01, 0.20, 1.0
+    # 1) Single-run baseline scenario (European call)
+    S0, K, r, q, sigma, T = 100.0, 100.0, 0.03, 0.01, 0.20, 1.0
     single = mc_european_option_gbm(S0, K, r, q, sigma, T,
                                     n_paths=200_000, option_type='call',
                                     antithetic=True, control_variate=True, seed=args.seed)
     single_eval = evaluate_single_run(single)
-    single_df = pd.DataFrame([{**single, **single_eval}]).round(6)
-    single_df.to_csv('single_run_results.csv', index=False)
+
     print("\n=== Single-run (European call) ===")
-    print(single_df.to_string(index=False))
+    headers = ["price", "stderr", "ci_low", "ci_high", "bs_price",
+               "abs_error", "rel_error", "bs_in_ci", "z_score", "n_paths"]
+    row = [
+        single["price"], single["stderr"], single_eval["ci_low"], single_eval["ci_high"],
+        single["bs_price"], single_eval["abs_error"], single_eval["rel_error"],
+        single_eval["bs_in_ci"], single_eval["z_score"], single["n_paths"]
+    ]
+    print_table(headers, [row])
+
+    save_csv("single_run_results.csv", headers, [row])
 
     # 2) Convergence study across path counts
     N_list = [20_000, 50_000, 100_000, 200_000, 400_000]
-    rows = []
+    conv_headers = ["n_paths", "price", "stderr", "ci_low", "ci_high", "bs_price", "bs_in_ci"]
+    conv_rows = []
+    print("=== Convergence across N paths ===")
     for i, n in enumerate(N_list):
         res = mc_european_option_gbm(S0, K, r, q, sigma, T,
                                      n_paths=n, option_type='call',
-                                     antithetic=True, control_variate=True,
-                                     seed=args.seed + 100 + i)
+                                     antithetic=True, control_variate=True, seed=args.seed + 100 + i)
         evalr = evaluate_single_run(res)
-        rows.append({
-            "n_paths": res['n_paths'], "price": res['price'], "stderr": res['stderr'],
-            "ci_low": res['ci95'][0], "ci_high": res['ci95'][1],
-            "bs_price": res['bs_price'], "bs_in_ci": evalr['bs_in_ci']
-        })
-    conv_df = pd.DataFrame(rows).round(6)
-    conv_df.to_csv('convergence_results.csv', index=False)
-    print("\n=== Convergence across N paths ===")
-    print(conv_df.to_string(index=False))
-
-    # Plot convergence (skip if --no_plot)
-    if not args.no_plot:
-        plt.figure(figsize=(7, 4.5))
-        plt.plot(conv_df['n_paths'], conv_df['price'], marker='o', label='MC price')
-        plt.fill_between(conv_df['n_paths'], conv_df['ci_low'], conv_df['ci_high'],
-                         color='orange', alpha=0.2, label='95% CI')
-        plt.axhline(conv_df['bs_price'].iloc[0], color='red', linestyle='--', label='Black–Scholes')
-        plt.xlabel('Number of paths (N)')
-        plt.ylabel('Price')
-        plt.title('Monte Carlo price convergence (European call)')
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig('convergence_plot.png', dpi=160)
-        plt.close()
-        print("\nSaved plot: convergence_plot.png")
+        conv_rows.append([
+            res["n_paths"], res["price"], res["stderr"],
+            evalr["ci_low"], evalr["ci_high"], res["bs_price"], evalr["bs_in_ci"]
+        ])
+    print_table(conv_headers, conv_rows)
+    save_csv("convergence_results.csv", conv_headers, conv_rows)
 
     # 3) Cross-section vs Black–Scholes (calls & puts)
     cross_params = [
-        {"K": 90,  "T": 0.5,  "option_type": 'call', "sigma": 0.22},
-        {"K": 100, "T": 1.0,  "option_type": 'put',  "sigma": 0.20},
-        {"K": 110, "T": 0.25, "option_type": 'call', "sigma": 0.18},
+        {"K": 90.0,  "T": 0.5,  "option_type": "call", "sigma": 0.22},
+        {"K": 100.0, "T": 1.0,  "option_type": "put",  "sigma": 0.20},
+        {"K": 110.0, "T": 0.25, "option_type": "call", "sigma": 0.18},
     ]
-    rows = []
+    cs_headers = ["S0", "K", "T", "type", "sigma", "mc_price", "stderr",
+                  "ci_low", "ci_high", "bs_price", "abs_error_vs_bs", "rel_error_vs_bs"]
+    cs_rows = []
+    print("=== Cross-section vs Black–Scholes ===")
     for j, p in enumerate(cross_params):
-        res = mc_european_option_gbm(S0, p['K'], r, q, p['sigma'], p['T'],
-                                     n_paths=150_000, option_type=p['option_type'],
+        res = mc_european_option_gbm(S0, p["K"], r, q, p["sigma"], p["T"],
+                                     n_paths=150_000, option_type=p["option_type"],
                                      antithetic=True, control_variate=True, seed=args.seed + 300 + j)
         evalr = evaluate_single_run(res)
-        rows.append({
-            "S0": S0, "K": p['K'], "T": p['T'], "type": p['option_type'], "sigma": p['sigma'],
-            "mc_price": res['price'], "stderr": res['stderr'],
-            "ci_low": res['ci95'][0], "ci_high": res['ci95'][1],
-            "bs_price": res['bs_price'], "abs_error_vs_bs": evalr['abs_error'],
-            "rel_error_vs_bs": evalr['rel_error']
-        })
-    cs_df = pd.DataFrame(rows).round(6)
-    cs_df.to_csv('cross_section_vs_bs.csv', index=False)
-    print("\n=== Cross-section vs Black–Scholes ===")
-    print(cs_df.to_string(index=False))
+        cs_rows.append([
+            S0, p["K"], p["T"], p["option_type"], p["sigma"],
+            res["price"], res["stderr"], evalr["ci_low"], evalr["ci_high"],
+            res["bs_price"], evalr["abs_error"], evalr["rel_error"]
+        ])
+    print_table(cs_headers, cs_rows)
+    save_csv("cross_section_vs_bs.csv", cs_headers, cs_rows)
 
-    # 4) Optional: compare to market CSV
-    if args.market_csv and os.path.isfile(args.market_csv):
-        market_df = pd.read_csv(args.market_csv)
-        out_df, rmse, coverage_ci, coverage_ba = compare_to_market(market_df)
-        out_df = out_df.round(6)
-        out_df.to_csv('market_comparison.csv', index=False)
-        print("\n=== Market comparison (" + args.market_csv + ") ===")
-        print(out_df.to_string(index=False))
-        print(f"\nSummary: RMSE={rmse:.6f}, Market mid in MC 95% CI={coverage_ci:.0%}, "
-              f"Price within bid-ask={coverage_ba if coverage_ba is not None else 'N/A'}")
+    # 4) Optional: compare to actual market CSV
+    if args.market_csv:
+        try:
+            market_rows = read_market_csv(args.market_csv)
+        except Exception as e:
+            print(f"\n[WARN] Could not read market CSV '{args.market_csv}': {e}")
+            market_rows = []
+
+        if market_rows:
+            out_rows, rmse, coverage_ci, coverage_ba = compare_to_market_rows(market_rows)
+            mkt_headers = ["S0", "K", "r", "q", "T", "type", "market_mid", "market_bid", "market_ask",
+                           "sigma", "n_paths", "mc_price", "stderr", "ci_low", "ci_high", "bs_price",
+                           "abs_error", "rel_error", "market_in_mc_ci", "price_in_bid_ask"]
+            mkt_data = [[
+                r["S0"], r["K"], r["r"], r["q"], r["T"], r["type"],
+                r["market_mid"], r["market_bid"], r["market_ask"], r["sigma"], r["n_paths"],
+                r["mc_price"], r["stderr"], r["ci_low"], r["ci_high"], r["bs_price"],
+                r["abs_error"], r["rel_error"], r["market_in_mc_ci"], r["price_in_bid_ask"]
+            ] for r in out_rows]
+
+            print("=== Market comparison ===")
+            print_table(mkt_headers, mkt_data)
+            print(f"Summary: RMSE={format_number(rmse)}, Market mid in MC 95% CI={coverage_ci:.0%}, "
+                  f"Price within bid-ask={('N/A' if coverage_ba is None else f'{coverage_ba:.0%}')}")
+
+            save_csv("market_comparison.csv", mkt_headers, mkt_data)
+        else:
+            print("\n[INFO] No market rows found; skipped market comparison.")
     else:
         print("\n(No market CSV provided; skipped market comparison.)")
 
     print("\nFiles saved: single_run_results.csv, convergence_results.csv, cross_section_vs_bs.csv"
-          + (", convergence_plot.png" if not args.no_plot else "")
           + (", market_comparison.csv" if args.market_csv else ""))
 
-if __name__ == '__main__':
-    main()
+
+if __name__ == "__main__":
+    # Ensure nice printing on Windows terminals
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)
