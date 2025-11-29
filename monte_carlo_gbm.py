@@ -1,25 +1,4 @@
-
-#!/usr/bin/env python3
-"""
-mc_gbm_minimal.py
-
-A single, minimal script that:
-  1) Performs Monte Carlo option pricing under GBM
-  2) Compares to baselines (Black–Scholes; optionally actual market CSV)
-  3) Executes and prints results for your paper
-
-Usage:
-  python mc_gbm_minimal.py
-  python mc_gbm_minimal.py --market_csv market_data.csv
-  python mc_gbm_minimal.py --seed 7
-
-CSV format for --market_csv (header required):
-  S0,K,r,q,T,option_type,market_mid,market_bid,market_ask,sigma,n_paths
-Notes:
-  - If 'sigma' is blank, implied volatility is backed out via bisection.
-  - 'market_bid' and 'market_ask' are optional; if both present, bid-ask coverage is reported.
-"""
-
+#Import relevant libraries
 import argparse
 import csv
 import sys
@@ -29,9 +8,8 @@ from typing import List, Dict, Optional
 import numpy as np
 
 
-# ------------------------------
-# Utilities: printing tables
-# ------------------------------
+
+#Stuff for printing tables
 def format_number(x, digits=6):
     """Consistent numeric formatting."""
     try:
@@ -43,7 +21,7 @@ def format_number(x, digits=6):
 def print_table(headers: List[str], rows: List[List], digits=6):
     """Print a simple aligned ASCII table without external libraries."""
     cols = len(headers)
-    # Prepare string rows
+    #Prep string rows
     str_rows = []
     for row in rows:
         str_row = []
@@ -53,27 +31,28 @@ def print_table(headers: List[str], rows: List[List], digits=6):
             else:
                 str_row.append(str(v))
         str_rows.append(str_row)
-    # Column widths
+    #Column widths
     widths = [len(h) for h in headers]
     for r in str_rows:
         for j in range(cols):
             widths[j] = max(widths[j], len(r[j]))
-    # Print header
+    #Print the header
     header_line = " | ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
     sep_line = "-+-".join("-" * widths[i] for i in range(cols))
     print(header_line)
     print(sep_line)
-    # Print rows
+    #Print all rows
     for r in str_rows:
         print(" | ".join(r[i].ljust(widths[i]) for i in range(cols)))
     print()
 
 
-# ------------------------------
-# Model: Normal CDF & Black–Scholes
-# ------------------------------
+
+# Modeleling-> Normal CDF + Black–Scholes
 def std_norm_cdf(x: float) -> float:
-    """Standard normal CDF via error function (no SciPy needed)."""
+    """
+    Standard normal CDF via error function
+    """
     return 0.5 * (1.0 + erf(x / sqrt(2.0)))
 
 
@@ -81,7 +60,7 @@ def black_scholes_price(S0, K, r, q, sigma, T, option_type='call'):
     """
     Black-Scholes/Merton price for European call/put with continuous dividend yield q.
     """
-    # Edge handling: T ~ 0 or sigma ~ 0 → discounted forward intrinsic
+    #Edge handling: T ~ 0 or sigma ~ 0 → discounted forward intrinsic
     if T <= 0 or sigma <= 0:
         forward = S0 * exp((r - q) * T)
         df = exp(-r * T)
@@ -98,9 +77,7 @@ def black_scholes_price(S0, K, r, q, sigma, T, option_type='call'):
         return df * K * std_norm_cdf(-d2) - dq * S0 * std_norm_cdf(-d1)
 
 
-# ------------------------------
-# Implied volatility via bisection
-# ------------------------------
+# Get implied volatility via bisection
 def implied_vol_bisection(S0, K, r, q, T, market_price, option_type='call',
                           tol=1e-6, max_iter=200, vol_low=1e-6, vol_high=5.0):
     """Back out implied vol so Black–Scholes price equals market price."""
@@ -117,9 +94,7 @@ def implied_vol_bisection(S0, K, r, q, T, market_price, option_type='call',
     return 0.5 * (low + high)
 
 
-# ------------------------------
-# Monte Carlo: exact GBM to S_T
-# ------------------------------
+# Monte Carlo -> the exact GBM to S_T
 def mc_european_option_gbm(
     S0, K, r, q, sigma, T,
     n_paths=200_000,
@@ -134,7 +109,6 @@ def mc_european_option_gbm(
     """
     rng = np.random.default_rng(seed)
 
-    # Antithetic sampling: use m normals, then +-Z to nearly double samples
     m = n_paths // 2 if antithetic else n_paths
     Z = rng.standard_normal(m)
 
@@ -150,7 +124,7 @@ def mc_european_option_gbm(
 
     df = exp(-r * T)
 
-    # Payoffs
+    #Calculate payoffs
     if option_type.lower() == 'call':
         payoffs = np.maximum(ST_all - K, 0.0)
     else:
@@ -158,7 +132,7 @@ def mc_european_option_gbm(
 
     disc_payoffs = df * payoffs
 
-    # Control variate: discounted S_T has known expectation S0 * e^{-qT}
+    #control variate
     if control_variate:
         X = df * ST_all
         EX = S0 * exp(-q * T)
@@ -188,9 +162,7 @@ def mc_european_option_gbm(
     }
 
 
-# ------------------------------
-# Evaluation helpers
-# ------------------------------
+#Helpers for evaluation
 def evaluate_single_run(result: Dict[str, float]) -> Dict[str, float]:
     """Diagnostics vs Black–Scholes for one MC run."""
     price = result['price']
@@ -211,70 +183,7 @@ def evaluate_single_run(result: Dict[str, float]) -> Dict[str, float]:
     }
 
 
-def compare_to_market_rows(rows: List[Dict[str, str]], default_n_paths=150_000, seed_base=500):
-    """
-    Compare MC prices to market mids across a provided list of dict rows.
-    Returns (out_rows, rmse, coverage_ci, coverage_ba).
-    """
-    out_rows = []
-    abs_errors_sq = []
-    ci_hits = []
-    bidask_hits = []
-
-    for i, row in enumerate(rows):
-        # Parse inputs safely
-        S0 = float(row['S0']); K = float(row['K']); r_ = float(row['r']); q_ = float(row['q']); T_ = float(row['T'])
-        typ = str(row['option_type']).lower()
-        market_mid = float(row['market_mid'])
-        bid = float(row['market_bid']) if (row.get('market_bid') not in (None, "")) else None
-        ask = float(row['market_ask']) if (row.get('market_ask') not in (None, "")) else None
-        n_paths = int(row['n_paths']) if (row.get('n_paths') not in (None, "")) else default_n_paths
-
-        # Use provided sigma or back out implied vol from market mid
-        if row.get('sigma') not in (None, ""):
-            sigma_ = float(row['sigma'])
-        else:
-            sigma_ = implied_vol_bisection(S0, K, r_, q_, T_, market_mid, option_type=typ)
-
-        res = mc_european_option_gbm(
-            S0=S0, K=K, r=r_, q=q_, sigma=sigma_, T=T_,
-            n_paths=n_paths, option_type=typ,
-            antithetic=True, control_variate=True, seed=seed_base + i
-        )
-        price = res['price']; stderr = res['stderr']; ci_low, ci_high = res['ci95']; bs = res['bs_price']
-
-        abs_err = abs(price - market_mid)
-        rel_err = abs_err / max(market_mid, 1e-12)
-        in_ci = (ci_low <= market_mid <= ci_high)
-        in_ba = None
-        if bid is not None and ask is not None and bid <= ask:
-            in_ba = (bid <= price <= ask)
-
-        # Aggregate metrics
-        abs_errors_sq.append(abs_err**2)
-        ci_hits.append(1 if in_ci else 0)
-        if in_ba is not None:
-            bidask_hits.append(1 if in_ba else 0)
-
-        out_rows.append({
-            "S0": S0, "K": K, "r": r_, "q": q_, "T": T_, "type": typ,
-            "market_mid": market_mid, "market_bid": bid, "market_ask": ask,
-            "sigma": sigma_, "n_paths": n_paths,
-            "mc_price": price, "stderr": stderr, "ci_low": ci_low, "ci_high": ci_high,
-            "bs_price": bs, "abs_error": abs_err, "rel_error": rel_err,
-            "market_in_mc_ci": in_ci, "price_in_bid_ask": in_ba
-        })
-
-    rmse = sqrt(sum(abs_errors_sq) / max(len(abs_errors_sq), 1)) if abs_errors_sq else float("nan")
-    coverage_ci = (sum(ci_hits) / len(ci_hits)) if ci_hits else float("nan")
-    coverage_ba = (sum(bidask_hits) / len(bidask_hits)) if bidask_hits else None
-
-    return out_rows, rmse, coverage_ci, coverage_ba
-
-
-# ------------------------------
-# CSV helpers (standard library only)
-# ------------------------------
+#Helpers for CSV files
 def save_csv(path: str, headers: List[str], rows: List[List]):
     """Write a CSV file using only the standard library."""
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -398,7 +307,6 @@ def main():
 
 
 if __name__ == "__main__":
-    # Ensure nice printing on Windows terminals
     try:
         main()
     except KeyboardInterrupt:
